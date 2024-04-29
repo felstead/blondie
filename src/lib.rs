@@ -45,8 +45,10 @@ use pdb_addr2line::{pdb::PDB, ContextPdbData};
 
 // Local imports
 use crate::event_trace_props::*;
-use crate::trace_context::*;
-use crate::results::*;
+
+// Local imports that we want to export
+pub use crate::trace_context::*;
+pub use crate::results::*;
 
 // Constants
 pub const KERNEL_LOGGER_NAMEA_LEN: usize = unsafe {

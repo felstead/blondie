@@ -69,7 +69,7 @@ impl TraceContext {
     }
 
     /// The Context takes ownership of the handle.
-    /// SAFETY:
+    /// # Safety
     ///  - target_process_handle must be a valid process handle.
     ///  - target_proc_id must be the id of the process.
     pub unsafe fn new(

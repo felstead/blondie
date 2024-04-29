@@ -50,9 +50,9 @@ debug = true
 
 [[bin]]
 name = "blondie"
-path = "src/blondie_bin.rs"
+path = "src/bins/blondie_bin.rs"
 required-features = ["inferno", "clap"]
 
 [[bin]]
 name = "blondie_dtrace"
-path = "src/blondie_dtrace.rs"
+path = "src/bins/blondie_dtrace.rs"
