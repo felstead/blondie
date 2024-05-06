@@ -1,11 +1,10 @@
-
 // Std imports
 
 // External imports
 
 // Local imports
-use crate::*;
 use crate::trace_context::*;
+use crate::*;
 
 /// An address from a callstack
 ///
@@ -87,7 +86,6 @@ impl<'a> CallStack<'a> {
     }
 }
 
-
 /// The sampled results from a process execution
 pub struct CollectionResults(pub TraceContext);
 impl CollectionResults {
@@ -148,7 +146,6 @@ impl CollectionResults {
         Ok(())
     }
 }
-
 
 type OwnedPdb = ContextPdbData<'static, 'static, std::io::Cursor<Vec<u8>>>;
 type PdbDb<'a, 'b> =

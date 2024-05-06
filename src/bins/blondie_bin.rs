@@ -63,7 +63,7 @@ fn main() -> Result<(), blondie::Error> {
         command_builder.stderr(std::process::Stdio::null());
     }
     let trace_ctx = blondie::trace_command(command_builder, args.kernel_stacks)?;
-
+    println!("TRACE COMMAND DONE");
     match &args.subcommand {
         Subcommands::Flamegraph {
             trace_file,

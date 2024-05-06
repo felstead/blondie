@@ -2,6 +2,7 @@
 use std::mem::size_of;
 use std::os::windows::ffi::OsStringExt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 // External imports
 use windows::core::{GUID, PSTR};
@@ -180,8 +181,8 @@ impl TraceContext {
         Ok(())
     }
 
-    /// Stops the trace and collects the results.
-    pub fn stop_trace(&mut self) -> Result<()> {
+    /// Stops the trace and collects the results, irrespective of whether or not the process is exited
+    pub fn stop_trace_immediate(&mut self) -> Result<()> {
         // This unblocks ProcessTrace
         let ret = unsafe {
             ControlTraceA(
@@ -213,12 +214,31 @@ impl TraceContext {
         Ok(())
     }
 
+    /// Blocks until the process is stopped, then completes the trace
+    pub fn stop_trace_wait(&mut self) -> Result<()> {
+        println!("WAITING");
+
+        println!("SELF: {:?}", addr_of!(*self));
+
+        println!("target_proc_handle: {:?}", &self.target_process_handle);
+        let ret = unsafe { WaitForSingleObject(self.target_process_handle, 0xFFFFFFFF) };
+        println!("DONE");
+        match ret.0 {
+            0 => self.stop_trace_immediate(),
+            0x00000080 => Err(Error::WaitOnChildErrAbandoned),
+            0x00000102 => Err(Error::WaitOnChildErrTimeout),
+            _ => Err(get_last_error("stop_trace_wait")),
+        }
+    }
+
     // This is the record collection callback passed into the tracing function
     unsafe extern "system" fn event_record_callback(record: *mut EVENT_RECORD) {
         let provider_guid_data1 = (*record).EventHeader.ProviderId.data1;
         let event_opcode = (*record).EventHeader.EventDescriptor.Opcode;
         let context = &mut *(*record).UserContext.cast::<TraceContext>();
         context.trace_running.store(true, Ordering::Relaxed);
+
+        println!("ThreadID: {:?}", thread::current().id());
 
         const EVENT_TRACE_TYPE_LOAD: u8 = 10;
         if event_opcode == EVENT_TRACE_TYPE_LOAD {
@@ -350,7 +370,6 @@ impl Drop for TraceContext {
         }
     }
 }
-
 
 /// Returns a sequence of (image_file_path, image_base)
 fn list_kernel_modules() -> Vec<(OsString, u64, u64)> {
