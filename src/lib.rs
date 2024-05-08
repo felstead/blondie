@@ -198,11 +198,15 @@ fn acquire_privileges() -> Result<()> {
     Ok(())
 }
 /// SAFETY: is_suspended must only be true if `target_process` is suspended
-unsafe fn trace_from_process_id(
+unsafe fn trace_from_process_id<F>(
     target_process_id: u32,
     is_suspended: bool,
     kernel_stacks: bool,
-) -> Result<TraceContext> {
+    trace_scope: F,
+) -> Result<TraceContext>
+where
+    F: FnOnce(&mut TraceContext) -> Result<()>,
+{
     let mut winver_info = OSVERSIONINFOA::default();
     winver_info.dwOSVersionInfoSize = size_of::<OSVERSIONINFOA>() as u32;
     let ret = GetVersionExA(&mut winver_info);
@@ -238,12 +242,6 @@ unsafe fn trace_from_process_id(
         }
     }
 
-    let mut kernel_logger_name_with_nul = KERNEL_LOGGER_NAMEA
-        .as_bytes()
-        .iter()
-        .cloned()
-        .chain(Some(0))
-        .collect::<Vec<u8>>();
     // Build the trace properties, we want EVENT_TRACE_FLAG_PROFILE for the "SampledProfile" event
     // https://docs.microsoft.com/en-us/windows/win32/etw/sampledprofile
     // In https://docs.microsoft.com/en-us/windows/win32/etw/event-tracing-mof-classes that event is listed as a "kernel event"
@@ -287,18 +285,17 @@ unsafe fn trace_from_process_id(
     event_trace_props.data.MinimumBuffers = core_count.get() as u32 * 4;
     event_trace_props.data.MaximumBuffers = core_count.get() as u32 * 6;
     event_trace_props.data.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
-    event_trace_props
-        .s
-        .copy_from_slice(&kernel_logger_name_with_nul[..]);
+    event_trace_props.s.copy_from_slice(unsafe {
+        std::slice::from_raw_parts(KERNEL_LOGGER_NAMEA.0, KERNEL_LOGGER_NAMEA_LEN + 1)
+    });
 
-    let kernel_logger_name_with_nul_pcstr = PCSTR(kernel_logger_name_with_nul.as_ptr());
     // Stop an existing session with the kernel logger, if it exists
     // We use a copy of `event_trace_props` since ControlTrace overwrites it
     {
         let mut event_trace_props_copy = event_trace_props.clone();
         let control_stop_retcode = ControlTraceA(
             None,
-            kernel_logger_name_with_nul_pcstr,
+            KERNEL_LOGGER_NAMEA,
             addr_of_mut!(event_trace_props_copy) as *mut _,
             EVENT_TRACE_CONTROL_STOP,
         );
@@ -314,7 +311,7 @@ unsafe fn trace_from_process_id(
     {
         let start_retcode = StartTraceA(
             addr_of_mut!(trace_session_handle),
-            kernel_logger_name_with_nul_pcstr,
+            KERNEL_LOGGER_NAMEA,
             addr_of_mut!(event_trace_props) as *mut _,
         );
         if start_retcode != ERROR_SUCCESS {
@@ -350,7 +347,7 @@ unsafe fn trace_from_process_id(
     //TODO: Do we need to Box the context?
 
     let mut log = EVENT_TRACE_LOGFILEA::default();
-    log.LoggerName = PSTR(kernel_logger_name_with_nul.as_mut_ptr());
+    log.LoggerName = PSTR(KERNEL_LOGGER_NAMEA.as_ptr() as *mut _);
     log.Anonymous1.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME
         | PROCESS_TRACE_MODE_EVENT_RECORD
         | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
@@ -525,12 +522,13 @@ unsafe fn trace_from_process_id(
         NtResumeProcess(context.target_process_handle.0);
     }
 
-    // Wait for it to end
-    wait_for_process_by_handle(target_proc_handle)?;
+    // Wait for our trace processing tasks to complete
+    trace_scope(&mut context)?;
+
     // This unblocks ProcessTrace
     let ret = ControlTraceA(
         <CONTROLTRACE_HANDLE as Default>::default(),
-        PCSTR(kernel_logger_name_with_nul.as_ptr()),
+        KERNEL_LOGGER_NAMEA,
         addr_of_mut!(event_trace_props) as *mut _,
         EVENT_TRACE_CONTROL_STOP,
     );
@@ -553,20 +551,44 @@ unsafe fn trace_from_process_id(
 
 /// The sampled results from a process execution
 pub struct CollectionResults(TraceContext);
+
+/// Trace for the duration of a passed in closure in the current process
+pub fn trace_scope_inprocess<F>(kernel_stacks: bool, trace_scope: F) -> Result<CollectionResults>
+where
+    F: FnOnce(),
+{
+    let res = unsafe {
+        trace_from_process_id(std::process::id(), false, kernel_stacks, |_ctx| {
+            trace_scope();
+            Ok(())
+        })
+    };
+    res.map(CollectionResults)
+}
+
 /// Trace an existing child process based only on its process ID (pid).
 /// It is recommended that you use `trace_command` instead, since it suspends the process on creation
 /// and only resumes it after the trace has started, ensuring that all samples are captured.
 pub fn trace_pid(process_id: u32, kernel_stacks: bool) -> Result<CollectionResults> {
-    let res = unsafe { trace_from_process_id(process_id, false, kernel_stacks) };
+    let res = unsafe {
+        trace_from_process_id(process_id, false, kernel_stacks, |ctx| {
+            wait_for_process_by_handle(ctx.target_process_handle)
+        })
+    };
     res.map(CollectionResults)
 }
 /// Trace an existing child process.
 /// It is recommended that you use `trace_command` instead, since it suspends the process on creation
 /// and only resumes it after the trace has started, ensuring that all samples are captured.
 pub fn trace_child(process: std::process::Child, kernel_stacks: bool) -> Result<CollectionResults> {
-    let res = unsafe { trace_from_process_id(process.id(), false, kernel_stacks) };
+    let res = unsafe {
+        trace_from_process_id(process.id(), false, kernel_stacks, |ctx| {
+            wait_for_process_by_handle(ctx.target_process_handle)
+        })
+    };
     res.map(CollectionResults)
 }
+
 /// Execute `command` and trace it, periodically collecting call stacks.
 /// The trace also tracks dlls and exes loaded by the process and loads the debug info for
 /// them, if it can find it. The debug info is used to resolve addresses to symbol names and
@@ -583,7 +605,11 @@ pub fn trace_command(
         .creation_flags(CREATE_SUSPENDED.0)
         .spawn()
         .map_err(Error::SpawnErr)?;
-    let res = unsafe { trace_from_process_id(proc.id(), true, kernel_stacks) };
+    let res = unsafe {
+        trace_from_process_id(proc.id(), true, kernel_stacks, |ctx| {
+            wait_for_process_by_handle(ctx.target_process_handle)
+        })
+    };
     if res.is_err() {
         // Kill the suspended process if we had some kind of error
         let _ = proc.kill();
